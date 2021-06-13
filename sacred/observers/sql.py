@@ -8,6 +8,8 @@ import warnings
 from sacred.commandline_options import cli_option
 from sacred.observers.base import RunObserver
 from sacred.serializer import flatten
+from sacred.observers.sql_bases import Base, Experiment, Host, Run
+import sqlalchemy as sqla
 
 DEFAULT_SQL_PRIORITY = 40
 
@@ -15,7 +17,7 @@ DEFAULT_SQL_PRIORITY = 40
 # ############################# Observer #################################### #
 
 
-class SqlObserver(RunObserver):
+class SqlObserverBase(RunObserver):
     @classmethod
     def create(cls, url, echo=False, priority=DEFAULT_SQL_PRIORITY):
         warnings.warn(
@@ -41,7 +43,7 @@ class SqlObserver(RunObserver):
 
     @classmethod
     def create_from(cls, engine, session, priority=DEFAULT_SQL_PRIORITY):
-        """Instantiate a SqlObserver with an existing engine and session."""
+        """Instantiate a SqlObserverBase with an existing engine and session."""
         self = cls.__new__(cls)  # skip __init__ call
         self.engine = engine
         self.session = session
@@ -147,10 +149,148 @@ class SqlObserver(RunObserver):
         return run.to_json()
 
     def __eq__(self, other):
-        if isinstance(other, SqlObserver):
+        if isinstance(other, SqlObserverBase):
             # fixme: this will probably fail to detect two equivalent engines
             return self.engine == other.engine and self.session == other.session
         return False
+
+
+class SqlObserver(SqlObserverBase):
+    """An object to record python sacred experiment details to SQL database.
+    
+    This sub-class extends the SqlObserver object from the sacred package to 
+    allow for the addition of metrics logging during an experiment run. The
+    _add_event method is overwritten using most of the original code with the 
+    exception of an added Metrics table, sub-classed from the Base object which
+    is a sqlalchemy declarative base class. The log_metrics function is a 
+    custom implementation that reformats the data in metrics_by_name and inserts
+    the data into the Metrics table. Neither are expected to be used directly
+    by the end user, so example documentation is not included.
+    """
+    def log_metrics(self, metrics_by_name: dict, info: dict) -> None:
+        """Logs metrics recorded during an experiment to sql table.
+    
+        The function reformats the data in the metrics_by_name dictionary. The
+        metrics table is then located and the data are committed to the table.
+        
+        Parameters
+        ----------
+            metrics_by_name : dict
+                Contains keys for name, steps, timestamp, and value for logged
+                metrics
+            info : dict
+                Not used in this implementation but included for compatibility
+                with Mongodb observer object.
+                
+        Returns
+        -------
+            None
+                
+        See Also
+        --------
+            SqlObserver : view the base class here - https://github.com/IDSIA/sacred/blob/master/sacred/observers/sql.py
+            ex.log_scalar : more on how this method is called - https://github.com/IDSIA/sacred/blob/e62bb685a0eb05d1ab9d98382c01a3a857b00d46/sacred/run.py#L460
+            MongoObserver.log_metrics : for more on the inclusion of the info 
+                parameter - https://github.com/IDSIA/sacred/blob/e62bb685a0eb05d1ab9d98382c01a3a857b00d46/sacred/observers/mongo.py#L328
+            
+        Notes
+        -----
+            This method is used by the sacred experiment's log_scalar method and
+            is not intended to be directly called.
+        """
+        # Retrieve the table.
+        meta = sqla.MetaData(self.engine)
+        table = sqla.Table('metrics', meta,
+        sqla.Column('id', sqla.Integer, primary_key=True),
+        sqla.Column('run_id', sqla.String(24)),
+        sqla.Column('name', sqla.String(64)),
+        sqla.Column('steps', sqla.Integer),
+        sqla.Column('timestamps', sqla.DateTime),
+        sqla.Column('values', sqla.Integer))
+        # In case the table doesn't already exist.
+        meta.create_all()
+
+        # Keys are not used. Each value is a dictionary.
+        metrics_lst = [v for _, v in metrics_by_name.items()]
+        records = []
+
+        for m in metrics_lst:
+            metric = zip(m['steps'], m['timestamps'], m['values'])
+            for step, time, value in metric:
+                # Recreate each record using the metric table's formatting.
+                record = {
+                    'run_id': self.run.run_id,
+                    'name': m['name'],
+                    'steps': step,
+                    'timestamps': time,
+                    'values': value,
+                }
+                # Accumulate the records for multi-insert below.
+                records.append(record)
+
+        # Avoid empty rows in Metrics table on runs with errors.
+        if not records:
+            return None
+
+        else:
+            conn = self.engine.connect()
+            conn.execute(table.insert(), records)
+
+
+    def _add_event(self, ex_info, command, host_info, config, meta_info, _id, 
+                   status, **kwargs) -> int:
+        """A method to add run events to sacred experiments.
+        This method is overwritten solely to add the creation of the metrics
+        table via the Metrics class. The rest of the code remains unchanged.
+                
+        Returns
+        -------
+            int
+                The unique identifier for the current experiment run.
+                
+        See Also
+        --------
+            SqlObserver._add_event : for more on the original method - https://github.com/IDSIA/sacred/blob/e62bb685a0eb05d1ab9d98382c01a3a857b00d46/sacred/observers/sql.py#L74
+        """
+        class Metrics(Base):
+            """This class sub-classes the Base object which is a sqlalchemy
+            declarative base object. Every sub-class results in the creation of
+            a table with the given column variables and table name.
+            """
+            __tablename__ = "metrics"
+            __table_args__ = {'extend_existing': True}
+            id = sqla.Column(sqla.Integer, primary_key=True)
+            run_id = sqla.Column(sqla.String(24))
+            name = sqla.Column(sqla.String(64))
+            steps = sqla.Column(sqla.Integer)
+            timestamp = sqla.Column(sqla.DateTime)
+            value = sqla.Column(sqla.Integer)
+
+            def to_json(self):
+                pass
+
+        Base.metadata.create_all(self.engine, checkfirst=True)
+        sql_exp = Experiment.get_or_create(ex_info, self.session)
+        sql_host = Host.get_or_create(host_info, self.session)
+        if _id is None:
+            i = self.session.query(Run).order_by(Run.id.desc()).first()
+            _id = 0 if i is None else i.id + 1
+
+        self.run = Run(
+            run_id=str(_id),
+            config=json.dumps(flatten(config)),
+            command=command,
+            priority=meta_info.get("priority", 0),
+            comment=meta_info.get("comment", ""),
+            experiment=sql_exp,
+            host=sql_host,
+            status=status,
+            **kwargs,
+        )
+        self.session.add(self.run)
+        self.save()
+
+        return _id or self.run.run_id
 
 
 # ######################## Commandline Option ############################### #
