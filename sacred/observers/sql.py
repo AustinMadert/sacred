@@ -156,17 +156,8 @@ class SqlObserverBase(RunObserver):
 
 
 class SqlObserver(SqlObserverBase):
-    """An object to record python sacred experiment details to SQL database.
-    
-    This sub-class extends the SqlObserver object from the sacred package to 
-    allow for the addition of metrics logging during an experiment run. The
-    _add_event method is overwritten using most of the original code with the 
-    exception of an added Metrics table, sub-classed from the Base object which
-    is a sqlalchemy declarative base class. The log_metrics function is a 
-    custom implementation that reformats the data in metrics_by_name and inserts
-    the data into the Metrics table. Neither are expected to be used directly
-    by the end user, so example documentation is not included.
-    """
+
+
     def log_metrics(self, metrics_by_name: dict, info: dict) -> None:
         """Logs metrics recorded during an experiment to sql table.
     
@@ -178,20 +169,10 @@ class SqlObserver(SqlObserverBase):
             metrics_by_name : dict
                 Contains keys for name, steps, timestamp, and value for logged
                 metrics
+                
             info : dict
                 Not used in this implementation but included for compatibility
                 with Mongodb observer object.
-                
-        Returns
-        -------
-            None
-                
-        See Also
-        --------
-            SqlObserver : view the base class here - https://github.com/IDSIA/sacred/blob/master/sacred/observers/sql.py
-            ex.log_scalar : more on how this method is called - https://github.com/IDSIA/sacred/blob/e62bb685a0eb05d1ab9d98382c01a3a857b00d46/sacred/run.py#L460
-            MongoObserver.log_metrics : for more on the inclusion of the info 
-                parameter - https://github.com/IDSIA/sacred/blob/e62bb685a0eb05d1ab9d98382c01a3a857b00d46/sacred/observers/mongo.py#L328
             
         Notes
         -----
@@ -247,10 +228,6 @@ class SqlObserver(SqlObserverBase):
         -------
             int
                 The unique identifier for the current experiment run.
-                
-        See Also
-        --------
-            SqlObserver._add_event : for more on the original method - https://github.com/IDSIA/sacred/blob/e62bb685a0eb05d1ab9d98382c01a3a857b00d46/sacred/observers/sql.py#L74
         """
         class Metrics(Base):
             """This class sub-classes the Base object which is a sqlalchemy
